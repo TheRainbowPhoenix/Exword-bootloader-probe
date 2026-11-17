@@ -1,0 +1,79 @@
+name: Build UPDADN2 key tester
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test matrix transitions and mapping
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror \
+            -Iapps/key-tester tests/test_keys.c apps/key-tester/keys.c -o test_keys
+          ./test_keys
+  updadn2:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/therainbowphoenix/gint-docker:main
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install EX-word fxSDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --branch fix/exword-data-load-alignment \
+            https://github.com/TheRainbowPhoenix/fxsdk-exword.git /tmp/fxsdk-src
+          cmake -S /tmp/fxsdk-src -B /tmp/fxsdk-build \
+            -DCMAKE_INSTALL_PREFIX=/tmp/fxsdk-exword \
+            -DFXLINK_DISABLE_SDL2=ON -DFXLINK_DISABLE_UDISKS2=ON
+          cmake --build /tmp/fxsdk-build --parallel 2
+          cmake --install /tmp/fxsdk-build
+          echo /tmp/fxsdk-exword/bin >> "$GITHUB_PATH"
+      - name: Build standalone key tester
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build \
+            -DCMAKE_TOOLCHAIN_FILE=/tmp/fxsdk-exword/lib/cmake/fxsdk/EXWORD.cmake \
+            -DCMAKE_MODULE_PATH=/tmp/fxsdk-exword/lib/cmake/fxsdk
+          cmake --build build --parallel 2
+      - name: Check updater header and entry point
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import struct
+          import subprocess
+          from pathlib import Path
+          image = Path("build/UPDADN2.BIN").read_bytes()
+          assert image.startswith(b"CASIO CY10x ADDIN MODULE FOR RELEASE ROM\0")
+          assert struct.unpack_from(">II", image, 48) == (0x8c18ff80, 0x8c190000)
+          assert 128 < len(image) < 1048576
+          elf = "build/key_tester"
+          head = subprocess.check_output(["sh-elf-readelf", "-h", elf], text=True)
+          assert "0x8c190000" in head
+          symbols = subprocess.check_output(["sh-elf-nm", "-a", elf], text=True)
+          assert "exword_sys_" not in symbols
+          print("UPDADN2 header, entry and no-OS-syscall check passed")
+          PY
+      - name: Upload key tester UPDADN2
+        uses: actions/upload-artifact@v4
+        with:
+          name: EXWord-key-tester-UPDADN2
+          path: build/UPDADN2.BIN
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload debugging ELF and map
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: EXWord-key-tester-debug
+          path: |
+            build/key_tester
+            build/key_tester.map
+          if-no-files-found: warn
+          retention-days: 14
